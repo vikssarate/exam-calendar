@@ -77,6 +77,9 @@ hr{border:none;border-top:1px solid var(--line);margin:10px 0}
     <button id="exportCsv">Export CSV</button>
     <button id="exportIcs">Export ICS</button>
     <button id="settingsBtn">Settings</button>
+    <!-- NEW: Sync & Pull -->
+    <button id="syncNow">Sync</button>
+    <button id="pullNow" class="ghost">Pull</button>
     <span class="note" id="countNote"></span>
   </div>
 </header>
@@ -182,8 +185,11 @@ hr{border:none;border-top:1px solid var(--line);margin:10px 0}
   </div>
 </div>
 
+<!-- PouchDB -->
+<script src="https://cdn.jsdelivr.net/npm/pouchdb@7.3.1/dist/pouchdb.min.js"></script>
+
 <script>
-(function(){
+(async function(){
   const JOBS_URL='data/jobs.json';
 
   // --- DOM -------
@@ -199,9 +205,89 @@ hr{border:none;border-top:1px solid var(--line);margin:10px 0}
   const state={
     remote:[], all:[], version:'',
     drafts:load('jcal_drafts',[]), deletes:load('jcal_deletes',[]),
-    who:'', sortKey:'examOn', sortDir:'asc', month:new Date(), cfg:load('jcal_cfg',{}),
+    who: localStorage.getItem('jcal_who') || '',
+    sortKey:'examOn', sortDir:'asc', month:new Date(), cfg:load('jcal_cfg',{}),
     currentEditKey:null
   };
+
+  // ===== NEW: COUCH/Pouch config (no auth) =====
+  const COUCH_BASE = 'https://couch.techstudy.me';
+  const COUCH_DB   = 'calendar';
+  const REMOTE_URL = `${COUCH_BASE}/${COUCH_DB}`;
+  const LOCAL_DB_NAME = 'jcal-local';
+  const STATE_DOC_ID  = 'jcal_state_v1'; // single snapshot doc for this app
+
+  const localDB  = new PouchDB(LOCAL_DB_NAME);
+  const remoteDB = new PouchDB(REMOTE_URL, { skip_setup:true });
+
+  let writingToPouch=false, applyingRemote=false, tDeb=null;
+
+  function packState(){
+    return {
+      drafts: state.drafts,
+      deletes: state.deletes,
+      cfg: state.cfg,
+      who: state.who,
+      ver: state.version || '',
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  async function saveToPouch(){
+    try{
+      writingToPouch = true;
+      let doc;
+      try{ doc = await localDB.get(STATE_DOC_ID); }
+      catch(e){ if(e.status!==404) throw e; doc={_id:STATE_DOC_ID, app:'gs-record'}; }
+      doc.app = 'calendar-record';
+      doc.data = packState();
+      await localDB.put(doc);
+      await PouchDB.replicate(localDB, remoteDB, { doc_ids:[STATE_DOC_ID] });
+    }catch(err){ console.error('Pouch save error', err); }
+    finally{ writingToPouch=false; }
+  }
+  function saveToPouchDebounced(){ clearTimeout(tDeb); tDeb=setTimeout(saveToPouch, 300); }
+
+  async function applyDoc(doc){
+    if(!doc || !doc.data) return;
+    applyingRemote = true;
+    const d = doc.data;
+    state.drafts = Array.isArray(d.drafts)? d.drafts : [];
+    state.deletes = Array.isArray(d.deletes)? d.deletes : [];
+    state.cfg = d.cfg || {};
+    state.who = d.who || '';
+    // persist to localStorage too
+    localStorage.setItem('jcal_who', state.who||'');
+    saveRaw('jcal_drafts', state.drafts);
+    saveRaw('jcal_deletes', state.deletes);
+    saveRaw('jcal_cfg', state.cfg);
+    compose(); populateWho(); render(); drawCalendar();
+    applyingRemote = false;
+  }
+
+  async function bootstrapRemoteFirst(){
+    try{
+      await PouchDB.replicate(remoteDB, localDB, { doc_ids:[STATE_DOC_ID] });
+      const doc = await localDB.get(STATE_DOC_ID).catch(()=>null);
+      if(doc && doc.data){ await applyDoc(doc); }
+      else if((state.drafts.length + state.deletes.length)>0 || Object.keys(state.cfg||{}).length>0){
+        // nothing found remotely; seed with our local
+        await saveToPouch();
+      }
+    }catch(e){ console.warn('Bootstrap pull failed', e); }
+  }
+
+  function startLiveSync(){
+    PouchDB.sync(localDB, remoteDB, { live:true, retry:true })
+      .on('error', err => console.error('live sync error', err));
+
+    localDB.changes({ since:'now', live:true, include_docs:true, doc_ids:[STATE_DOC_ID] })
+      .on('change', ch => {
+        if(writingToPouch || applyingRemote) return;
+        if(ch.doc && ch.doc.data) applyDoc(ch.doc);
+      })
+      .on('error', err => console.error('changes error', err));
+  }
 
   // --- utils -----
   const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
@@ -210,7 +296,10 @@ hr{border:none;border-top:1px solid var(--line);margin:10px 0}
   function daysUntil(s){ if(!s) return null; const t0=new Date(); const d=new Date(s+'T00:00:00'); const base=new Date(t0.getFullYear(),t0.getMonth(),t0.getDate()); return Math.round((d-base)/86400000); }
   function badge(n){ if(n===null) return '<span class="badge">—</span>'; if(n<0) return `<span class="badge bad">${Math.abs(n)}d past</span>`; if(n===0) return `<span class="badge warn">Today</span>`; if(n<=7) return `<span class="badge warn">${n}d</span>`; if(n<=30) return `<span class="badge ok">${n}d</span>`; return `<span class="badge">${n}d</span>`; }
   const keyOf=r=>[r.name,r.title,r.appliedOn||'',r.examOn||''].map(x=>String(x||'').trim().toLowerCase()).join('|');
-  function save(k,v){ localStorage.setItem(k, JSON.stringify(v)); }
+
+  // IMPORTANT: wrap localStorage save to auto-sync
+  function saveRaw(k,v){ localStorage.setItem(k, JSON.stringify(v)); }
+  function save(k,v){ saveRaw(k,v); saveToPouchDebounced(); }
   function load(k,def){ try{ return JSON.parse(localStorage.getItem(k)||JSON.stringify(def)); }catch{ return def; } }
   const b64=s=>btoa(unescape(encodeURIComponent(s))); const unb64=s=>decodeURIComponent(escape(atob(s)));
 
@@ -234,9 +323,9 @@ hr{border:none;border-top:1px solid var(--line);margin:10px 0}
   }
   function populateWho(){
     const names = Array.from(new Set(state.all.map(r=>r.name).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
-    const current = state.who || localStorage.getItem('jcal_who') || '';
+    const current = state.who || '';
     whoSel.innerHTML='<option value="">All aspirants</option>'+names.map(n=>`<option value="${esc(n)}">${esc(n)}</option>`).join('');
-    if(names.includes(current)) whoSel.value=current; state.who=whoSel.value;
+    if(current && names.includes(current)) whoSel.value=current; state.who=whoSel.value;
   }
 
   // --- filters / views ---
@@ -321,12 +410,10 @@ hr{border:none;border-top:1px solid var(--line);margin:10px 0}
   function openDay(ds){
     const list = applyFilters(state.all).filter(r=>r.examOn===ds);
     const nice = new Date(ds+'T00:00:00').toLocaleDateString(undefined,{weekday:'short',year:'numeric',month:'short',day:'numeric'});
-    // reuse edit modal for a quick summary + add new with prefilled date
     $('#modalTitle').textContent = 'Exams on ' + nice;
     setForm({name:state.who||'', org:'', title:'', status:'Applied', appliedOn:todayISO(), examOn:ds, notes:''});
     show(editModal,true);
 
-    // inject a small list above form
     const box = editModal.querySelector('.box');
     let listDiv = box.querySelector('#dayList');
     if(!listDiv){ listDiv = document.createElement('div'); listDiv.id='dayList'; listDiv.style.marginBottom='8px'; box.insertBefore(listDiv, box.children[1]); }
@@ -348,7 +435,10 @@ hr{border:none;border-top:1px solid var(--line);margin:10px 0}
   $('#todayBtn').addEventListener('click', ()=>{ state.month=new Date(); drawCalendar(); });
 
   // --- filters change ---
-  [whoSel,q,upcomingOnly,windowSel].forEach(el=> el.addEventListener('input', ()=>{ state.who=whoSel.value; render(); drawCalendar(); }));
+  [whoSel,q,upcomingOnly,windowSel].forEach(el=> el.addEventListener('input', ()=>{
+    state.who=whoSel.value; save('jcal_who', state.who); // will also trigger pouch save
+    render(); drawCalendar();
+  }));
 
   // --- list actions (edit/delete + calendar links) ---
   rows.addEventListener('click', (e)=>{
@@ -388,8 +478,8 @@ hr{border:none;border-top:1px solid var(--line);margin:10px 0}
     const rec=findByKey(key); if(!rec) return;
     if(!confirm('Delete this entry?')) return;
     const i=state.drafts.findIndex(d=> keyOf(d)===key);
-    if(i>=0){ state.drafts.splice(i,1); save('jcal_drafts', state.drafts); }
-    else if(!state.deletes.includes(key)){ state.deletes.push(key); save('jcal_deletes', state.deletes); }
+    if(i>=0){ state.drafts.splice(i,1); save('jcal_drafts',state.drafts); }
+    else if(!state.deletes.includes(key)){ state.deletes.push(key); save('jcal_deletes',state.deletes); }
     compose(); render(); drawCalendar();
   }
   function findByKey(k){
@@ -494,7 +584,6 @@ hr{border:none;border-top:1px solid var(--line);margin:10px 0}
     const delset=new Set(state.deletes);
     const out={version: new Date().toISOString().slice(0,10), jobs: []};
     base.jobs.forEach(r=>{ if(!delset.has(keyOf(r))) out.jobs.push(r); });
-    // upsert drafts
     const map=new Map(out.jobs.map(r=>[keyOf(r),r]));
     state.drafts.forEach(d=> map.set(keyOf(d), d));
     out.jobs = Array.from(map.values());
@@ -514,8 +603,22 @@ hr{border:none;border-top:1px solid var(--line);margin:10px 0}
   // reload
   reloadBtn.addEventListener('click', ()=> loadData(true));
 
-  // init
-  loadData();
+  // ===== NEW: manual Sync / Pull buttons =====
+  document.getElementById('syncNow').addEventListener('click', async ()=>{
+    try{ await saveToPouch(); }catch(e){ console.error(e); }
+  });
+  document.getElementById('pullNow').addEventListener('click', async ()=>{
+    try{
+      await PouchDB.replicate(remoteDB, localDB, { doc_ids:[STATE_DOC_ID] });
+      const doc = await localDB.get(STATE_DOC_ID).catch(()=>null);
+      if(doc) await applyDoc(doc);
+    }catch(e){ console.error(e); }
+  });
+
+  // ===== INIT =====
+  await bootstrapRemoteFirst(); // brings back your drafts/deletes/settings if you cleared browser data
+  await loadData();            // loads jobs.json view
+  startLiveSync();             // keep in sync continuously
 })();
 </script>
 </body>
