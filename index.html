@@ -292,7 +292,16 @@ hr{border:none;border-top:1px solid var(--line);margin:10px 0}
   // --- utils -----
   const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
   const fmt = s => !s ? '—' : new Date(s+'T00:00:00').toLocaleDateString(undefined,{year:'numeric',month:'short',day:'2-digit'});
-  const todayISO = ()=> new Date().toISOString().slice(0,10);
+
+  // NEW: local YYYY-MM-DD (avoid UTC shift)
+  function ymdLocal(d){
+    const y = d.getFullYear();
+    const m = String(d.getMonth()+1).padStart(2,'0');
+    const day = String(d.getDate()).padStart(2,'0');
+    return `${y}-${m}-${day}`;
+  }
+
+  const todayISO = ()=> ymdLocal(new Date());
   function daysUntil(s){ if(!s) return null; const t0=new Date(); const d=new Date(s+'T00:00:00'); const base=new Date(t0.getFullYear(),t0.getMonth(),t0.getDate()); return Math.round((d-base)/86400000); }
   function badge(n){ if(n===null) return '<span class="badge">—</span>'; if(n<0) return `<span class="badge bad">${Math.abs(n)}d past</span>`; if(n===0) return `<span class="badge warn">Today</span>`; if(n<=7) return `<span class="badge warn">${n}d</span>`; if(n<=30) return `<span class="badge ok">${n}d</span>`; return `<span class="badge">${n}d</span>`; }
   const keyOf=r=>[r.name,r.title,r.appliedOn||'',r.examOn||''].map(x=>String(x||'').trim().toLowerCase()).join('|');
@@ -386,7 +395,7 @@ hr{border:none;border-top:1px solid var(--line);margin:10px 0}
     const cells=[];
     for(let i=0;i<42;i++){
       const d=new Date(start); d.setDate(start.getDate()+i);
-      const ds=d.toISOString().slice(0,10);
+      const ds = ymdLocal(d); // FIX: use local date, not UTC
       const isOther = d.getMonth()!==m;
       const ev = byDate.get(ds)||[];
       const pills = ev.slice(0,3).map(r=> `<div class="pill" title="${esc(r.title)}">${esc(r.title)} <small>${esc(r.name||'')}</small></div>`).join('');
@@ -544,7 +553,7 @@ hr{border:none;border-top:1px solid var(--line);margin:10px 0}
   function escapeICS(s){ return String(s||'').replace(/([,;])/g,'\\$1').replace(/\n/g,'\\n'); }
   function plusDays(ymd, n){
     const d=new Date(ymd+'T00:00:00'); d.setDate(d.getDate()+n);
-    return d.toISOString().slice(0,10);
+    return ymdLocal(d); // FIX: use local date, not UTC
   }
 
   // settings / GitHub
