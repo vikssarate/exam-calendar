@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-<title>Current Due Task — Daily Reset Tracker</title>
+<title>Current Due Task — Subjects with Multiple Topics</title>
 <link rel="icon" href="data:,">
 <style>
   :root{
@@ -21,28 +21,31 @@
   button{background:var(--accent);color:#06102a;border:0;border-radius:10px;padding:8px 12px;font-weight:700;cursor:pointer}
   button.secondary{background:#202a44;color:var(--ink);border:1px solid var(--line)}
   button.small{padding:4px 8px;border-radius:8px;font-size:12px}
-  table{width:100%;border-collapse:separate;border-spacing:0 8px}
-  thead th{font-size:12px;color:var(--muted);text-align:left;padding:0 10px}
-  tbody td{background:#101731;border:1px solid var(--line);padding:10px;border-left:0;border-right:0;vertical-align:middle}
-  tbody tr td:first-child{border-left:1px solid var(--line);border-radius:10px 0 0 10px}
-  tbody tr td:last-child{border-right:1px solid var(--line);border-radius:0 10px 10px 0}
-  input[type="text"]{width:100%;background:#0b1128;border:1px solid var(--line);color:var(--ink);
-    padding:8px 10px;border-radius:8px;outline:none}
-  input[type="text"]::placeholder{color:#6b7280}
-  .center{display:flex;align-items:center;justify-content:center}
   .badge{display:inline-block;padding:2px 8px;border-radius:999px;border:1px solid var(--line);background:#0b1128;color:#9aa3c7;font-size:12px}
   .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
   .kpi{display:flex;align-items:center;gap:10px;padding:10px;border:1px solid var(--line);border-radius:10px;background:#0b1128}
   .kpi .n{font-weight:800;font-size:18px}
   .kpi .label{color:#9aa3c7;font-size:12px}
-  .right{text-align:right}
-  .del{background:#23121a;color:#ffd6da;border:1px solid #4b1a23}
   .foot{display:flex;justify-content:flex-end;margin-top:6px;color:#9aa3c7;font-size:12px}
+  input[type="text"]{width:100%;background:#0b1128;border:1px solid var(--line);color:var(--ink);
+    padding:8px 10px;border-radius:8px;outline:none}
+  input[type="text"]::placeholder{color:#6b7280}
 
-  /* side-by-side checkboxes */
-  .checks{display:flex;gap:16px;align-items:center;justify-content:center;flex-wrap:wrap}
-  .ck{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:12px;user-select:none}
-  .ck input{transform:scale(1.2)}
+  /* Subject card layout */
+  .subject-card{border:1px solid var(--line);border-radius:12px;background:#101731;padding:10px;margin:10px 0}
+  .subject-head{display:flex;gap:10px;align-items:center}
+  .subject-head .left{flex:1 1 auto;display:flex;gap:10px;align-items:center}
+  .subject-actions{display:flex;gap:8px;align-items:center}
+  .subject-actions .ck{display:inline-flex;gap:6px;align-items:center;color:var(--muted);font-size:12px}
+  .subject-actions .del{background:#23121a;color:#ffd6da;border:1px solid #4b1a23}
+
+  /* Topic row */
+  .topic-row{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;margin:8px 0 0}
+  .topic-controls{display:flex;gap:14px;align-items:center}
+  .ck{display:inline-flex;gap:6px;align-items:center;color:var(--muted);font-size:12px;user-select:none}
+  .ck input{transform:scale(1.15)}
+  .topic-del{background:#23121a;color:#ffd6da;border:1px solid #4b1a23}
+  .add-topic{margin-top:10px}
 </style>
 </head>
 <body>
@@ -52,25 +55,14 @@
     <div class="controls">
       <span class="badge" id="todayLabel"></span>
       <span class="badge" id="activeTopicsBadge" title="Topics not checked as done">Active Topics: 0</span>
-      <button id="addRow">+ Add Row</button>
+      <button id="addSubject">+ Add Subject</button>
       <button id="resetToday" class="secondary">Reset Today</button>
     </div>
   </header>
 
-  <section class="panel">
-    <table>
-      <thead>
-        <tr>
-          <th style="width:34px">#</th>
-          <th>Subject</th>
-          <th>Active Topic</th>
-          <th class="center">Chunk • Topic • Subject</th>
-          <th style="width:64px"></th>
-        </tr>
-      </thead>
-      <tbody id="rows"></tbody>
-    </table>
-    <div class="foot">Autosaves to your browser. <b>Chunk</b> resets daily only if Topic isn’t done.</div>
+  <section class="panel" id="subjectsPanel">
+    <!-- subject cards render here -->
+    <div class="foot"><b>Rules:</b> Topic <b>Chunk</b> resets daily only when Topic isn’t done. Topic/Subject done persist.</div>
   </section>
 
   <h2 style="font-size:16px;margin:18px 0 8px">Today Progress Report</h2>
@@ -94,146 +86,221 @@
 
 <script>
 (() => {
-  // ---------- Keys & helpers ----------
-  const TASKS_KEY = "cdt_tasks_v2";
-  const NEXTID_KEY = "cdt_nextid_v2";
-  const LASTDATE_KEY = "cdt_last_date_v2";
-  const statusKey = k => `cdt_status_${k}`;
-  const dateKey = (d=new Date()) => {
+  // ------ Storage keys (v3) ------
+  const SUBJECTS_KEY = "cdt_subjects_v3";           // [{id, name, subjectDone, topics:[{tid, name, done}]}]
+  const NEXT_SID_KEY = "cdt_next_sid_v3";
+  const NEXT_TID_KEY = "cdt_next_tid_v3";
+  const LASTDATE_KEY = "cdt_last_date_v3";
+  const statusKey = k => `cdt_status_v3_${k}`;      // per-day status: t:<tid> {chunk,topicToday}, s:<sid> {subjectToday}
+
+  const dateKey = (d=new Date())=>{
     const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), dd=String(d.getDate()).padStart(2,'0');
     return `${y}-${m}-${dd}`;
   };
-  const debounce = (fn, ms=180) => { let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a), ms); }; };
+  const debounce = (fn,ms=180)=>{ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a),ms); }; };
 
-  function loadTasks(){ try{ const t=JSON.parse(localStorage.getItem(TASKS_KEY)||"[]"); t.forEach(x=>{ if(typeof x.topicDone!=='boolean') x.topicDone=false; if(typeof x.subjectDone!=='boolean') x.subjectDone=false; }); return t; }catch{return[];} }
-  function writeTasks(arr){ localStorage.setItem(TASKS_KEY, JSON.stringify(arr)); }
-  function saveTasksAndRender(arr){ writeTasks(arr); render(); }
-  function nextId(){ const n=+(localStorage.getItem(NEXTID_KEY)||"1"); localStorage.setItem(NEXTID_KEY,String(n+1)); return n; }
+  // ------ Load/Save ------
+  function loadSubjects(){
+    try {
+      const arr = JSON.parse(localStorage.getItem(SUBJECTS_KEY) || "[]");
+      arr.forEach(s=>{
+        if(typeof s.subjectDone!=='boolean') s.subjectDone=false;
+        if(!Array.isArray(s.topics)) s.topics=[];
+        s.topics.forEach(tp=>{ if(typeof tp.done!=='boolean') tp.done=false; });
+      });
+      return arr;
+    } catch { return []; }
+  }
+  function writeSubjects(arr){ localStorage.setItem(SUBJECTS_KEY, JSON.stringify(arr)); }
+  function saveAndRender(arr){ writeSubjects(arr); render(); }
+
+  const nextSID = ()=>{ const n=+(localStorage.getItem(NEXT_SID_KEY)||"1"); localStorage.setItem(NEXT_SID_KEY,String(n+1)); return n; };
+  const nextTID = ()=>{ const n=+(localStorage.getItem(NEXT_TID_KEY)||"1"); localStorage.setItem(NEXT_TID_KEY,String(n+1)); return n; };
 
   function loadStatus(dk){ try{ return JSON.parse(localStorage.getItem(statusKey(dk))||"{}"); }catch{return{};} }
   function saveStatus(dk,obj){ localStorage.setItem(statusKey(dk), JSON.stringify(obj)); updateKPIs(); }
 
-  const $rows=document.getElementById("rows");
+  // ------ DOM refs ------
+  const $subjectsPanel = document.getElementById("subjectsPanel");
+  const $addSubject = document.getElementById("addSubject");
+  const $resetToday = document.getElementById("resetToday");
+  const $todayLabel = document.getElementById("todayLabel");
 
-  // KPIs
-  const $todayLabel=document.getElementById("todayLabel");
-  const $activeTopicsBadge=document.getElementById("activeTopicsBadge");
   const $chunksDoneN=document.getElementById("chunksDoneN");
   const $chunksTotalN=document.getElementById("chunksTotalN");
   const $topicsDoneN=document.getElementById("topicsDoneN");
   const $topicsActiveN=document.getElementById("topicsActiveN");
   const $subjectsDoneN=document.getElementById("subjectsDoneN");
   const $subjectsActiveN=document.getElementById("subjectsActiveN");
+  const $activeTopicsBadge=document.getElementById("activeTopicsBadge");
 
+  // ------ Render ------
   function render(){
-    const tasks=loadTasks();
-    const dk=dateKey();
-    const st=loadStatus(dk);
-    $todayLabel.textContent=`Today: ${dk}`;
-    $rows.innerHTML="";
+    const subs = loadSubjects();
+    const dk = dateKey();
+    const st = loadStatus(dk);
+    $todayLabel.textContent = `Today: ${dk}`;
+    $subjectsPanel.querySelectorAll(".subject-card").forEach(n=>n.remove());
 
-    tasks.forEach((t,idx)=>{
-      const per=st[t.id]||{chunk:false,topicToday:false,subjectToday:false};
-      const chunkChecked = t.topicDone ? true : !!per.chunk;
-      const topicChecked = !!t.topicDone;
-      const subjectChecked = !!t.subjectDone;
+    subs.forEach((s, idx)=>{
+      // subject card
+      const card = document.createElement("div");
+      card.className = "subject-card";
 
-      const tr=document.createElement("tr");
-      tr.innerHTML=`
-        <td class="center">${idx+1}</td>
-        <td><input type="text" placeholder="Subject…" value="${t.subject||""}" autocapitalize="sentences" spellcheck="false"></td>
-        <td><input type="text" placeholder="Active topic…" value="${t.topic||""}" autocapitalize="sentences" spellcheck="false"></td>
-        <td class="center">
-          <div class="checks">
-            <label class="ck"><input type="checkbox" ${chunkChecked?"checked":""} ${t.topicDone?"disabled":""}><span>Chunk</span></label>
-            <label class="ck"><input type="checkbox" ${topicChecked?"checked":""}><span>Topic</span></label>
-            <label class="ck"><input type="checkbox" ${subjectChecked?"checked":""}><span>Subject</span></label>
-          </div>
-        </td>
-        <td class="right"><button class="small del">Delete</button></td>
+      // Subject head
+      const head = document.createElement("div");
+      head.className = "subject-head";
+
+      head.innerHTML = `
+        <div class="left">
+          <div class="badge">${idx+1}</div>
+          <input type="text" placeholder="Subject…" value="${s.name||""}" autocapitalize="sentences" spellcheck="false">
+        </div>
+        <div class="subject-actions">
+          <label class="ck"><input type="checkbox" ${s.subjectDone?"checked":""}> <span>Subject</span></label>
+          <button class="small del">Delete</button>
+        </div>
       `;
+      const subjInput = head.querySelector('input[type="text"]');
+      const subjDoneEl = head.querySelector('input[type="checkbox"]');
+      const subjDel = head.querySelector('.del');
 
-      const debouncedPersist = debounce(()=>writeTasks(tasks));
+      // Save subject name without re-render
+      subjInput.addEventListener("input", debounce(e=>{
+        s.name = e.target.value; writeSubjects(subs);
+      }));
 
-      // inputs
-      tr.children[1].querySelector("input").addEventListener("input", e => { t.subject=e.target.value; debouncedPersist(); });
-      tr.children[2].querySelector("input").addEventListener("input", e => { t.topic=e.target.value; debouncedPersist(); });
-
-      const [chunkEl, topicEl, subjectEl] = tr.querySelectorAll(".checks input");
-
-      chunkEl.addEventListener("change", e => {
-        const dk=dateKey(); const st=loadStatus(dk);
-        st[t.id]=st[t.id]||{chunk:false,topicToday:false,subjectToday:false};
-        st[t.id].chunk=e.target.checked;
-        saveStatus(dk,st);
+      // Subject Done (persistent) + today mark
+      subjDoneEl.addEventListener("change", e=>{
+        s.subjectDone = e.target.checked;
+        const dk=dateKey(); const sts=loadStatus(dk);
+        const key = `s:${s.id}`;
+        sts[key] = sts[key] || {subjectToday:false};
+        sts[key].subjectToday = e.target.checked;
+        writeSubjects(subs);
+        saveStatus(dk, sts);
       });
 
-      topicEl.addEventListener("change", e => {
-        const dk=dateKey(); const st=loadStatus(dk);
-        const checked=e.target.checked;
-        t.topicDone=checked;
-        st[t.id]=st[t.id]||{chunk:false,topicToday:false,subjectToday:false};
-        st[t.id].topicToday=checked;
-        if(checked){ st[t.id].chunk=true; chunkEl.checked=true; chunkEl.disabled=true; }
-        else{ chunkEl.disabled=false; }
-        saveTasksAndRender(tasks);
-        saveStatus(dk,st);
+      // Delete subject
+      subjDel.addEventListener("click", ()=>{
+        const subs2 = loadSubjects().filter(x=>x.id!==s.id);
+        saveAndRender(subs2);
       });
 
-      subjectEl.addEventListener("change", e => {
-        const dk=dateKey(); const st=loadStatus(dk);
-        const checked=e.target.checked;
-        t.subjectDone=checked;
-        st[t.id]=st[t.id]||{chunk:false,topicToday:false,subjectToday:false};
-        st[t.id].subjectToday=checked;
-        writeTasks(tasks);
-        saveStatus(dk,st);
+      card.appendChild(head);
+
+      // Topic list
+      s.topics.forEach(tp=>{
+        const key = `t:${tp.tid}`;
+        const per = (st[key] || {chunk:false, topicToday:false});
+        const chunkChecked = tp.done ? true : !!per.chunk;   // persistent checked when topic done
+        const topicChecked = !!tp.done;
+
+        const row = document.createElement("div");
+        row.className = "topic-row";
+        row.innerHTML = `
+          <input type="text" placeholder="Topic…" value="${tp.name||""}" autocapitalize="sentences" spellcheck="false">
+          <div class="topic-controls">
+            <label class="ck"><input type="checkbox" ${chunkChecked?"checked":""} ${tp.done?"disabled":""}><span>Chunk</span></label>
+            <label class="ck"><input type="checkbox" ${topicChecked?"checked":""}><span>Topic</span></label>
+            <button class="small topic-del">Delete</button>
+          </div>
+        `;
+
+        const [tInput] = row.getElementsByTagName("input");
+        const [chunkEl, topicEl] = row.querySelectorAll('.topic-controls input');
+        const tDel = row.querySelector(".topic-del");
+
+        // Topic name save (no render)
+        tInput.addEventListener("input", debounce(e=>{
+          tp.name = e.target.value; writeSubjects(subs);
+        }));
+
+        // Chunk per-day
+        chunkEl.addEventListener("change", e=>{
+          const dk=dateKey(); const sts=loadStatus(dk);
+          sts[key] = sts[key] || {chunk:false, topicToday:false};
+          sts[key].chunk = e.target.checked;
+          saveStatus(dk, sts);
+        });
+
+        // Topic Done (persistent) -> disable chunk + mark today
+        topicEl.addEventListener("change", e=>{
+          const checked = e.target.checked;
+          tp.done = checked;
+          const dk=dateKey(); const sts=loadStatus(dk);
+          sts[key] = sts[key] || {chunk:false, topicToday:false};
+          sts[key].topicToday = checked;
+          if(checked){ sts[key].chunk = true; } // credit chunk today too
+          saveAndRender(subs);
+          saveStatus(dk, sts);
+        });
+
+        // Delete topic
+        tDel.addEventListener("click", ()=>{
+          s.topics = s.topics.filter(x=>x.tid!==tp.tid);
+          saveAndRender(subs);
+        });
+
+        card.appendChild(row);
       });
 
-      tr.querySelector(".del").addEventListener("click", ()=>{
-        const tasks2=loadTasks().filter(x=>x.id!==t.id);
-        saveTasksAndRender(tasks2);
+      // Add topic button
+      const addT = document.createElement("button");
+      addT.className = "small add-topic";
+      addT.textContent = "+ Add Topic";
+      addT.addEventListener("click", ()=>{
+        s.topics.push({ tid: nextTID(), name:"", done:false, created: Date.now() });
+        saveAndRender(subs);
       });
+      card.appendChild(addT);
 
-      $rows.appendChild(tr);
+      $subjectsPanel.insertBefore(card, $subjectsPanel.firstChild); // newest on top
+      $subjectsPanel.appendChild(card);
     });
 
     updateKPIs();
   }
 
   function updateKPIs(){
-    const tasks=loadTasks();
-    const st=loadStatus(dateKey());
+    const subs = loadSubjects();
+    const st = loadStatus(dateKey());
 
-    let chunksDoneToday=0, topicsDoneToday=0, subjectsDoneToday=0;
-    tasks.forEach(t=>{
-      const s=st[t.id]||{};
-      if(s.chunk) chunksDoneToday++;
-      if(s.topicToday) topicsDoneToday++;
-      if(s.subjectToday) subjectsDoneToday++;
+    // Today counters
+    let chunksToday=0, topicsToday=0, subjectsToday=0;
+    subs.forEach(s=>{
+      // subject today
+      const skey = `s:${s.id}`; if(st[skey]?.subjectToday) subjectsToday++;
+      // topics
+      s.topics.forEach(tp=>{
+        const tkey = `t:${tp.tid}`;
+        if(st[tkey]?.chunk) chunksToday++;
+        if(st[tkey]?.topicToday) topicsToday++;
+      });
     });
 
-    const activeTopics=tasks.filter(t=>!t.topicDone).length;
-    const activeSubjects=tasks.filter(t=>!t.subjectDone).length;
+    // Active totals
+    const activeTopics = subs.reduce((a,s)=>a + s.topics.filter(t=>!t.done).length, 0);
+    const activeSubjects = subs.filter(s=>!s.subjectDone).length;
 
-    $chunksDoneN.textContent=chunksDoneToday;
-    $chunksTotalN.textContent=activeTopics;
-    $topicsDoneN.textContent=topicsDoneToday;
-    $topicsActiveN.textContent=activeTopics;
-    $subjectsDoneN.textContent=subjectsDoneToday;
-    $subjectsActiveN.textContent=activeSubjects;
-    $activeTopicsBadge.textContent=`Active Topics: ${activeTopics}`;
+    $chunksDoneN.textContent = chunksToday;
+    $chunksTotalN.textContent = activeTopics;
+    $topicsDoneN.textContent = topicsToday;
+    $topicsActiveN.textContent = activeTopics;
+    $subjectsDoneN.textContent = subjectsToday;
+    $subjectsActiveN.textContent = activeSubjects;
+    $activeTopicsBadge.textContent = `Active Topics: ${activeTopics}`;
   }
 
-  // Add / Reset
-  document.getElementById("addRow").addEventListener("click", ()=>{
-    const tasks=loadTasks();
-    tasks.push({id:nextId(),subject:"",topic:"",topicDone:false,subjectDone:false,created:Date.now()});
-    saveTasksAndRender(tasks);
+  // ------ Add / Reset ------
+  document.getElementById("addSubject").addEventListener("click", ()=>{
+    const subs = loadSubjects();
+    subs.push({ id: nextSID(), name:"", subjectDone:false, topics:[], created: Date.now() });
+    saveAndRender(subs);
   });
 
   function clearTodayStatuses(){
-    const dk=dateKey();
+    const dk = dateKey();
     localStorage.removeItem(statusKey(dk));
     localStorage.setItem(LASTDATE_KEY, dk);
     render();
@@ -242,11 +309,11 @@
     if(confirm("Reset today's ticks? (Topic/Subject Done stay)")) clearTodayStatuses();
   });
 
-  // Midnight rollover
+  // ------ Midnight rollover ------
   function ensureToday(){
-    const dk=dateKey();
-    const last=localStorage.getItem(LASTDATE_KEY);
-    if(last!==dk){ localStorage.setItem(LASTDATE_KEY, dk); render(); }
+    const dk = dateKey();
+    const last = localStorage.getItem(LASTDATE_KEY);
+    if(last !== dk){ localStorage.setItem(LASTDATE_KEY, dk); render(); }
   }
   setInterval(ensureToday, 60*1000);
   if(!localStorage.getItem(LASTDATE_KEY)) localStorage.setItem(LASTDATE_KEY, dateKey());
