@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-<title>Current Due Task — Synced</title>
+<title>Current Due Task — Synced (Conflict-safe)</title>
 <link rel="icon" href="data:,">
 <style>
   :root{
@@ -27,7 +27,8 @@
   .kpi .n{font-weight:800;font-size:18px}
   .kpi .label{color:#9aa3c7;font-size:12px}
   .foot{display:flex;justify-content:flex-end;margin-top:6px;color:#9aa3c7;font-size:12px}
-  input[type="text"]{width:100%;background:#0b1128;border:1px solid var(--line);color:var(--ink);
+
+  input[type="text"]{width:100%;background:#0b1128;border:1px solid var(--line);color:#eef1ff;
     padding:8px 10px;border-radius:8px;outline:none}
   input[type="text"]::placeholder{color:#6b7280}
 
@@ -36,12 +37,12 @@
   .subject-head{display:flex;gap:10px;align-items:center}
   .subject-head .left{flex:1 1 auto;display:flex;gap:10px;align-items:center}
   .subject-actions{display:flex;gap:8px;align-items:center}
-  .subject-actions .ck{display:inline-flex;gap:6px;align-items:center;color:var(--muted);font-size:12px}
+  .subject-actions .ck{display:inline-flex;gap:6px;align-items:center;color:#9aa3c7;font-size:12px}
   .subject-actions .del{background:#23121a;color:#ffd6da;border:1px solid #4b1a23}
 
   .topic-row{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;margin:8px 0 0}
   .topic-controls{display:flex;gap:14px;align-items:center}
-  .ck{display:inline-flex;gap:6px;align-items:center;color:var(--muted);font-size:12px;user-select:none}
+  .ck{display:inline-flex;gap:6px;align-items:center;color:#9aa3c7;font-size:12px;user-select:none}
   .ck input{transform:scale(1.15)}
   .topic-del{background:#23121a;color:#ffd6da;border:1px solid #4b1a23}
   .add-topic{margin-top:10px}
@@ -76,6 +77,7 @@
   </section>
 
   <section class="panel" id="subjectsPanel">
+    <!-- subject cards render here -->
     <div class="foot"><b>Rules:</b> Topic <b>Chunk</b> resets daily only when Topic isn’t done. Topic/Subject done persist.</div>
   </section>
 
@@ -102,118 +104,124 @@
 <script src="https://cdn.jsdelivr.net/npm/pouchdb@8.0.1/dist/pouchdb.min.js"></script>
 <script>
 (() => {
-  // ------- IDs / URLs -------
-  const SUBJECTS_ID = "subjects_v3";
-  const todayId = () => `status-${dateKey()}`;
-  const REMOTE_URL = "https://couch.techstudy.me/progress";
+  // ---------- IDs / URLs ----------
+  const SUBJECTS_ID = "subjects_v3";                 // single doc for structure
+  const REMOTE_URL  = "https://couch.techstudy.me/progress";
+  const todayId = () => `status-${dateKey()}`;       // per-day status doc
 
-  // ------- State -------
-  const local = new PouchDB("progress_local_v3");
+  // ---------- DBs ----------
+  const local  = new PouchDB("progress_local_v3");
   const remote = new PouchDB(REMOTE_URL, {skip_setup:false});
-  let subjectsDoc = null;       // {_id,_rev, nextSID,nextTID, subjects:[{id,name,subjectDone,topics:[{tid,name,done}]}]}
-  let statusDoc = null;         // {_id,_rev, map: { 't:<tid>':{chunk,topicToday}, 's:<sid>':{subjectToday} } }
+
+  // in-memory mirrors
+  let subjectsDoc = null;   // {_id,_rev,version,nextSID,nextTID,subjects:[{id,name,subjectDone,topics:[{tid,name,done}]}]}
+  let statusDoc   = null;   // {_id,_rev,version,map:{ 't:<tid>':{chunk,topicToday}, 's:<sid>':{subjectToday} } }
   let liveSync = null;
   let isTyping = false, pendingRender = false;
 
-  // ------- Utils -------
+  // ---------- utils ----------
   function dateKey(d=new Date()){
     const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), dd=String(d.getDate()).padStart(2,'0');
     return `${y}-${m}-${dd}`;
   }
-  const debounce = (fn,ms=180)=>{let t;return(...a)=>{clearTimeout(t);t=setTimeout(()=>fn(...a),ms);}};
+  const debounce = (fn,ms=200)=>{let t;return(...a)=>{clearTimeout(t);t=setTimeout(()=>fn(...a),ms);}};
 
-  // conflict-safe put
-  async function safePut(db, docUpdater){
-    for(let i=0;i<3;i++){
+  // Conflict-safe updater
+  async function safeUpdate(id, mutator){
+    for(let i=0;i<4;i++){
       try{
-        const cur = await db.get(docUpdater._id);
-        const merged = docUpdater(cur);
-        return await db.put(merged);
+        let cur;
+        try{ cur = await local.get(id); }catch(e){ if(e.status===404) cur = {_id:id}; else throw e; }
+        const next = JSON.parse(JSON.stringify(cur));
+        const updated = mutator(next) || next;
+        const res = await local.put(updated);
+        return res;
       }catch(e){
-        if(e.status===404){
-          try{ return await db.put(docUpdater({_id:docUpdater._id})); }
-          catch(err){ if(err.status!==409) throw err; }
-        }else if(e.status!==409){ throw e; }
+        if(e.status === 409) continue; // retry with newer rev
+        throw e;
       }
     }
-    throw new Error("Too many conflicts");
+    throw new Error("conflict loop");
   }
 
-  // ------- Bootstrap -------
+  // ---------- bootstrap ----------
   async function firstPull(){
-    try{ await PouchDB.replicate(remote, local, {batch_size:200}); }catch(e){ /* offline, continue */ }
+    try{ await PouchDB.replicate(remote, local, {batch_size:200}); }catch(e){ /* offline ok */ }
   }
-  async function loadSubjects(){
+  async function ensureSubjects(){
     try{ subjectsDoc = await local.get(SUBJECTS_ID); }
     catch(e){
       if(e.status===404){
         subjectsDoc = {_id:SUBJECTS_ID, version:3, nextSID:1, nextTID:1, subjects:[]};
-        await local.put(subjectsDoc);
+        const res = await local.put(subjectsDoc); subjectsDoc._rev = res.rev;
       } else throw e;
     }
   }
-  async function loadStatusForToday(){
+  async function ensureStatus(){
     const id = todayId();
     try{ statusDoc = await local.get(id); }
     catch(e){
       if(e.status===404){
         statusDoc = {_id:id, version:1, map:{}};
-        await local.put(statusDoc);
+        const res = await local.put(statusDoc); statusDoc._rev = res.rev;
       } else throw e;
     }
   }
 
-  // ------- Live sync & change feed -------
-  function setLiveIndicator(state, msg=""){
+  // ---------- live sync ----------
+  function setLiveIndicator(state, msg){
     const dot = document.getElementById("liveDot");
     const label = document.getElementById("syncLabel");
     dot.className = `dot ${state}`;
     label.textContent = msg || (state==="on"?"Sync: live":"Sync: offline");
   }
-
   function startLive(){
     if(liveSync) return;
     liveSync = local.sync(remote, {live:true, retry:true})
-      .on("change", info => { setLiveIndicator("on","Sync: live (changed)"); })
-      .on("paused", err => { setLiveIndicator(err?"warn":"on", err?"Sync: paused (retrying)":"Sync: live"); })
-      .on("active", () => { setLiveIndicator("on","Sync: live (active)"); })
-      .on("error", () => { setLiveIndicator("off","Sync: offline"); });
+      .on("change", ()=> setLiveIndicator("on","Sync: live (changed)"))
+      .on("paused", err => setLiveIndicator(err?"warn":"on", err?"Sync: paused (retrying)":"Sync: live"))
+      .on("active", ()=> setLiveIndicator("on","Sync: live (active)"))
+      .on("error", ()=> setLiveIndicator("off","Sync: offline"));
   }
   function stopLive(){ if(liveSync){ liveSync.cancel(); liveSync=null; setLiveIndicator("off","Sync: paused"); } }
 
-  // re-render on local changes (but not while typing)
-  local.changes({since:"now", live:true, include_docs:true}).on("change", async ch=>{
-    if(ch.id===SUBJECTS_ID){ subjectsDoc = ch.doc; } 
+  // local change feed → refresh mirrors (but avoid re-rendering while typing)
+  local.changes({since:"now", live:true, include_docs:true}).on("change", ch=>{
+    if(ch.id===SUBJECTS_ID){ subjectsDoc = ch.doc; }
     else if(ch.id===todayId()){ statusDoc = ch.doc; }
-    if(isTyping){ pendingRender=true; return; }
+    if(isTyping){ pendingRender = true; return; }
     render();
   });
 
-  // ------- UI rendering -------
-  const $subjectsPanel = document.getElementById("subjectsPanel");
+  // ---------- UI refs ----------
+  const $panel = document.getElementById("subjectsPanel");
   const $addSubject = document.getElementById("addSubject");
   const $resetToday = document.getElementById("resetToday");
   const $todayLabel = document.getElementById("todayLabel");
+  const $activeTopicsBadge = document.getElementById("activeTopicsBadge");
 
-  const $chunksDoneN=document.getElementById("chunksDoneN");
-  const $chunksTotalN=document.getElementById("chunksTotalN");
-  const $topicsDoneN=document.getElementById("topicsDoneN");
-  const $topicsActiveN=document.getElementById("topicsActiveN");
-  const $subjectsDoneN=document.getElementById("subjectsDoneN");
-  const $subjectsActiveN=document.getElementById("subjectsActiveN");
-  const $activeTopicsBadge=document.getElementById("activeTopicsBadge");
+  const $chunksDoneN = document.getElementById("chunksDoneN");
+  const $chunksTotalN = document.getElementById("chunksTotalN");
+  const $topicsDoneN = document.getElementById("topicsDoneN");
+  const $topicsActiveN = document.getElementById("topicsActiveN");
+  const $subjectsDoneN = document.getElementById("subjectsDoneN");
+  const $subjectsActiveN = document.getElementById("subjectsActiveN");
 
+  // ---------- render ----------
   function render(){
     if(!subjectsDoc || !statusDoc) return;
     const subs = subjectsDoc.subjects || [];
-    const stmap = statusDoc.map || {};
+    const st = statusDoc.map || {};
     const dk = dateKey();
     $todayLabel.textContent = `Today: ${dk}`;
-    $subjectsPanel.querySelectorAll(".subject-card").forEach(n=>n.remove());
+    // clear existing cards
+    [...$panel.querySelectorAll(".subject-card")].forEach(el=>el.remove());
 
     subs.forEach((s, idx)=>{
       const card = document.createElement("div");
       card.className = "subject-card";
+
+      // head
       const head = document.createElement("div");
       head.className = "subject-head";
       head.innerHTML = `
@@ -229,32 +237,45 @@
       const subjDoneEl = head.querySelector('input[type="checkbox"]');
       const subjDel = head.querySelector('.del');
 
-      subjInput.addEventListener("focus", ()=>{isTyping=true;});
-      subjInput.addEventListener("blur", ()=>{isTyping=false; if(pendingRender){pendingRender=false; render();}});
+      subjInput.addEventListener("focus", ()=>{ isTyping=true; });
+      subjInput.addEventListener("blur",  ()=>{ isTyping=false; if(pendingRender){ pendingRender=false; render(); }});
       subjInput.addEventListener("input", debounce(async e=>{
-        s.name = e.target.value; subjectsDoc = await local.put({...subjectsDoc, subjects:subs}).then(res=>({...subjectsDoc,_rev:res.rev}));
+        const val = e.target.value;
+        await safeUpdate(SUBJECTS_ID, doc => {
+          doc.version ??= 3; doc.nextSID ??= 1; doc.nextTID ??= 1; doc.subjects ??= [];
+          const target = doc.subjects.find(x=>x.id===s.id);
+          if(target) target.name = val;
+          return doc;
+        });
       }));
 
       subjDoneEl.addEventListener("change", async e=>{
-        s.subjectDone = e.target.checked;
-        subjectsDoc = await local.put({...subjectsDoc, subjects:subs}).then(res=>({...subjectsDoc,_rev:res.rev}));
-        const key = `s:${s.id}`;
-        stmap[key] = stmap[key] || {subjectToday:false};
-        stmap[key].subjectToday = e.target.checked;
-        statusDoc = await local.put({...statusDoc, map:stmap}).then(res=>({...statusDoc,_rev:res.rev}));
-        updateKPIs();
+        const checked = e.target.checked;
+        await safeUpdate(SUBJECTS_ID, doc => {
+          (doc.subjects||[]).find(x=>x.id===s.id).subjectDone = checked; return doc;
+        });
+        await safeUpdate(todayId(), doc => {
+          doc.version ??= 1; doc.map ??= {};
+          const key = `s:${s.id}`;
+          doc.map[key] = doc.map[key] || {subjectToday:false};
+          doc.map[key].subjectToday = checked;
+          return doc;
+        });
       });
 
       subjDel.addEventListener("click", async ()=>{
-        const filtered = subs.filter(x=>x.id!==s.id);
-        subjectsDoc = await local.put({...subjectsDoc, subjects:filtered}).then(res=>({...subjectsDoc,_rev:res.rev}));
+        await safeUpdate(SUBJECTS_ID, doc => {
+          doc.subjects = (doc.subjects||[]).filter(x=>x.id!==s.id);
+          return doc;
+        });
       });
 
       card.appendChild(head);
 
+      // topics
       (s.topics||[]).forEach(tp=>{
         const key = `t:${tp.tid}`;
-        const per = stmap[key] || {};
+        const per = st[key] || {};
         const chunkChecked = tp.done ? true : !!per.chunk;
         const topicChecked = !!tp.done;
 
@@ -272,101 +293,128 @@
         const [chunkEl, topicEl] = row.querySelectorAll('.topic-controls input');
         const tDel = row.querySelector(".topic-del");
 
-        tInput.addEventListener("focus", ()=>{isTyping=true;});
-        tInput.addEventListener("blur", ()=>{isTyping=false; if(pendingRender){pendingRender=false; render();}});
+        tInput.addEventListener("focus", ()=>{ isTyping=true; });
+        tInput.addEventListener("blur",  ()=>{ isTyping=false; if(pendingRender){ pendingRender=false; render(); }});
         tInput.addEventListener("input", debounce(async e=>{
-          tp.name = e.target.value;
-          subjectsDoc = await local.put({...subjectsDoc}).then(res=>({...subjectsDoc,_rev:res.rev}));
+          const val = e.target.value;
+          await safeUpdate(SUBJECTS_ID, doc => {
+            const subj = (doc.subjects||[]).find(x=>x.id===s.id);
+            if(subj){ const topic = (subj.topics||[]).find(z=>z.tid===tp.tid); if(topic) topic.name = val; }
+            return doc;
+          });
         }));
 
         chunkEl.addEventListener("change", async e=>{
-          stmap[key] = stmap[key] || {chunk:false, topicToday:false};
-          stmap[key].chunk = e.target.checked;
-          statusDoc = await local.put({...statusDoc, map:stmap}).then(res=>({...statusDoc,_rev:res.rev}));
-          updateKPIs();
+          const checked = e.target.checked;
+          await safeUpdate(todayId(), doc => {
+            doc.version ??= 1; doc.map ??= {};
+            doc.map[key] = doc.map[key] || {chunk:false,topicToday:false};
+            doc.map[key].chunk = checked;
+            return doc;
+          });
         });
 
         topicEl.addEventListener("change", async e=>{
           const checked = e.target.checked;
-          tp.done = checked;
-          subjectsDoc = await local.put({...subjectsDoc}).then(res=>({...subjectsDoc,_rev:res.rev}));
-          stmap[key] = stmap[key] || {chunk:false, topicToday:false};
-          stmap[key].topicToday = checked;
-          if(checked){ stmap[key].chunk = true; }
-          statusDoc = await local.put({...statusDoc, map:stmap}).then(res=>({...statusDoc,_rev:res.rev}));
-          render();
+          await safeUpdate(SUBJECTS_ID, doc => {
+            const subj = (doc.subjects||[]).find(x=>x.id===s.id);
+            if(subj){ const topic = (subj.topics||[]).find(z=>z.tid===tp.tid); if(topic) topic.done = checked; }
+            return doc;
+          });
+          await safeUpdate(todayId(), doc => {
+            doc.version ??= 1; doc.map ??= {};
+            doc.map[key] = doc.map[key] || {chunk:false,topicToday:false};
+            doc.map[key].topicToday = checked;
+            if(checked) doc.map[key].chunk = true;
+            return doc;
+          });
         });
 
         tDel.addEventListener("click", async ()=>{
-          s.topics = s.topics.filter(x=>x.tid!==tp.tid);
-          subjectsDoc = await local.put({...subjectsDoc}).then(res=>({...subjectsDoc,_rev:res.rev}));
+          await safeUpdate(SUBJECTS_ID, doc => {
+            const subj = (doc.subjects||[]).find(x=>x.id===s.id);
+            if(subj){ subj.topics = (subj.topics||[]).filter(z=>z.tid!==tp.tid); }
+            return doc;
+          });
         });
 
         card.appendChild(row);
       });
 
+      // add topic
       const addT = document.createElement("button");
       addT.className = "small add-topic";
       addT.textContent = "+ Add Topic";
       addT.addEventListener("click", async ()=>{
-        s.topics = s.topics || [];
-        s.topics.push({ tid: subjectsDoc.nextTID++, name:"", done:false, created: Date.now() });
-        subjectsDoc = await local.put({...subjectsDoc}).then(res=>({...subjectsDoc,_rev:res.rev}));
+        await safeUpdate(SUBJECTS_ID, doc => {
+          doc.version ??= 3; doc.nextTID ??= 1; doc.subjects ??= [];
+          const subj = (doc.subjects||[]).find(x=>x.id===s.id);
+          if(subj){
+            subj.topics = subj.topics || [];
+            subj.topics.push({ tid: doc.nextTID++, name:"", done:false, created: Date.now() });
+          }
+          return doc;
+        });
       });
       card.appendChild(addT);
 
-      $subjectsPanel.appendChild(card);
+      $panel.appendChild(card);
     });
 
     updateKPIs();
   }
 
   function updateKPIs(){
-    if(!subjectsDoc||!statusDoc) return;
-    const subs = subjectsDoc.subjects||[];
-    const map = statusDoc.map||{};
+    if(!subjectsDoc || !statusDoc) return;
+    const subs = subjectsDoc.subjects || [];
+    const map  = statusDoc.map || {};
     let chunksToday=0, topicsToday=0, subjectsToday=0;
+
     subs.forEach(s=>{
-      const skey=`s:${s.id}`; if(map[skey]?.subjectToday) subjectsToday++;
+      if(map[`s:${s.id}`]?.subjectToday) subjectsToday++;
       (s.topics||[]).forEach(tp=>{
-        const tkey=`t:${tp.tid}`;
-        if(map[tkey]?.chunk) chunksToday++;
-        if(map[tkey]?.topicToday) topicsToday++;
+        const key = `t:${tp.tid}`;
+        if(map[key]?.chunk)      chunksToday++;
+        if(map[key]?.topicToday) topicsToday++;
       });
     });
-    const activeTopics = subs.reduce((a,s)=>a+(s.topics||[]).filter(t=>!t.done).length,0);
+
+    const activeTopics   = subs.reduce((a,s)=>a + (s.topics||[]).filter(t=>!t.done).length, 0);
     const activeSubjects = subs.filter(s=>!s.subjectDone).length;
 
-    document.getElementById("chunksDoneN").textContent = chunksToday;
-    document.getElementById("chunksTotalN").textContent = activeTopics;
-    document.getElementById("topicsDoneN").textContent = topicsToday;
-    document.getElementById("topicsActiveN").textContent = activeTopics;
-    document.getElementById("subjectsDoneN").textContent = subjectsToday;
-    document.getElementById("subjectsActiveN").textContent = activeSubjects;
-    document.getElementById("activeTopicsBadge").textContent = `Active Topics: ${activeTopics}`;
+    $chunksDoneN.textContent = chunksToday;
+    $chunksTotalN.textContent = activeTopics;
+    $topicsDoneN.textContent = topicsToday;
+    $topicsActiveN.textContent = activeTopics;
+    $subjectsDoneN.textContent = subjectsToday;
+    $subjectsActiveN.textContent = activeSubjects;
+    $activeTopicsBadge.textContent = `Active Topics: ${activeTopics}`;
   }
 
-  // ------- Add / Reset -------
+  // ---------- actions ----------
   document.getElementById("addSubject").addEventListener("click", async ()=>{
-    subjectsDoc.subjects.push({ id: subjectsDoc.nextSID++, name:"", subjectDone:false, topics:[], created: Date.now() });
-    subjectsDoc = await local.put({...subjectsDoc}).then(res=>({...subjectsDoc,_rev:res.rev}));
+    await safeUpdate(SUBJECTS_ID, doc => {
+      doc.version ??= 3; doc.nextSID ??= 1; doc.subjects ??= [];
+      doc.subjects.push({ id: doc.nextSID++, name:"", subjectDone:false, topics:[], created: Date.now() });
+      return doc;
+    });
   });
 
   function clearToday(){
-    statusDoc = {...statusDoc, map:{}};
-    local.put(statusDoc).then(res=>{ statusDoc._rev=res.rev; render(); });
+    safeUpdate(todayId(), doc => { doc.version ??= 1; doc.map = {}; return doc; });
   }
-  document.getElementById("resetToday").addEventListener("click", ()=>{ if(confirm("Reset today's ticks?")) clearToday(); });
+  document.getElementById("resetToday").addEventListener("click", ()=> {
+    if(confirm("Reset today's ticks? (Topic/Subject Done stay)")) clearToday();
+  });
 
-  // ------- Date rollover -------
+  // date rollover
   function ensureToday(){
     const id = todayId();
-    if(statusDoc && statusDoc._id===id) return;
-    loadStatusForToday().then(render);
+    if(!statusDoc || statusDoc._id !== id) ensureStatus().then(render);
   }
   setInterval(ensureToday, 60*1000);
 
-  // ------- Sync controls -------
+  // sync controls
   document.getElementById("syncNow").addEventListener("click", async ()=>{
     document.getElementById("syncLabel").textContent = "Sync: pushing…";
     try{ await local.replicate.to(remote); document.getElementById("syncLabel").textContent = "Sync: pushed"; }
@@ -378,17 +426,25 @@
     catch{ document.getElementById("syncLabel").textContent = "Sync: pull failed"; }
   });
   document.getElementById("toggleLive").addEventListener("click", e=>{
-    if(liveSync){ stopLive(); e.target.textContent="Resume live"; }
-    else{ startLive(); e.target.textContent="Pause live"; }
+    if(liveSync){ stopLive(); e.target.textContent = "Resume live"; }
+    else{ startLive(); e.target.textContent = "Pause live"; }
   });
 
-  // ------- Start -------
+  // ---------- init ----------
   (async function init(){
-    await firstPull();           // get remote data first for new devices / cleared storage
-    await loadSubjects();
-    await loadStatusForToday();
-    render();
-    startLive();
+    try{
+      await firstPull();          // auto-pull for new device / cleared storage
+      await ensureSubjects();
+      await ensureStatus();
+      render();
+      startLive();
+    }catch(e){
+      console.error(e);
+      setLiveIndicator("warn","Sync: init failed (offline?)");
+      await ensureSubjects();
+      await ensureStatus();
+      render();
+    }
   })();
 })();
 </script>
