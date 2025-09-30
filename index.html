@@ -13,14 +13,13 @@
   *{box-sizing:border-box}
   html,body{height:100%}
   body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial}
-  a{color:var(--accent);text-decoration:none}
   .wrap{max-width:1100px;margin:24px auto;padding:0 14px}
   header{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:12px}
   h1{font-size:18px;margin:0}
-  .panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;box-shadow:0 0 0 1px rgba(0,0,0,.05) inset}
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px}
   .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   button{background:var(--accent);color:#06102a;border:0;border-radius:10px;padding:8px 12px;font-weight:700;cursor:pointer}
-  button.secondary{background:#202a44;color:var(--ink);border:1px solid var(--line);font-weight:600}
+  button.secondary{background:#202a44;color:var(--ink);border:1px solid var(--line)}
   button.small{padding:4px 8px;border-radius:8px;font-size:12px}
   table{width:100%;border-collapse:separate;border-spacing:0 8px}
   thead th{font-size:12px;color:var(--muted);text-align:left;padding:0 10px}
@@ -61,9 +60,9 @@
           <th style="width:34px">#</th>
           <th>Subject</th>
           <th>Active Topic</th>
-          <th class="center" title="Mark when a planned chunk is completed">Due Topic Chunk</th>
-          <th class="center" title="Mark when today's topic is finished">Topic Done</th>
-          <th class="center" title="Mark when the whole subject is done">Subject Done</th>
+          <th class="center">Due Topic Chunk</th>
+          <th class="center">Topic Done</th>
+          <th class="center">Subject Done</th>
           <th style="width:64px"></th>
         </tr>
       </thead>
@@ -93,123 +92,100 @@
 
 <script>
 (() => {
-  // -------- Storage Keys --------
-  const TASKS_KEY = "cdt_tasks_v2";            // tasks now store persistent topicDone/subjectDone
+  // ---------- Keys & helpers ----------
+  const TASKS_KEY = "cdt_tasks_v2";
   const NEXTID_KEY = "cdt_nextid_v2";
   const LASTDATE_KEY = "cdt_last_date_v2";
-
-  const statusKey = k => `cdt_status_${k}`;   // per-day, per-id: { chunk, topicToday, subjectToday }
+  const statusKey = k => `cdt_status_${k}`;
   const dateKey = (d=new Date()) => {
     const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), dd=String(d.getDate()).padStart(2,'0');
     return `${y}-${m}-${dd}`;
   };
+  const debounce = (fn, ms=250) => { let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a), ms); }; };
 
-  // -------- Helpers ----------
-  function loadTasks(){
-    try {
-      const t = JSON.parse(localStorage.getItem(TASKS_KEY) || "[]");
-      // migrate older tasks that may not have the new flags
-      t.forEach(x => { if(typeof x.topicDone!=='boolean') x.topicDone=false; if(typeof x.subjectDone!=='boolean') x.subjectDone=false; });
-      return t;
-    } catch { return []; }
-  }
-  function saveTasks(arr){
-    localStorage.setItem(TASKS_KEY, JSON.stringify(arr));
-    render();
-  }
-  function nextId(){
-    const n = parseInt(localStorage.getItem(NEXTID_KEY) || "1", 10);
-    localStorage.setItem(NEXTID_KEY, String(n+1));
-    return n;
-  }
+  function loadTasks(){ try{ const t=JSON.parse(localStorage.getItem(TASKS_KEY)||"[]"); t.forEach(x=>{ if(typeof x.topicDone!=='boolean') x.topicDone=false; if(typeof x.subjectDone!=='boolean') x.subjectDone=false; }); return t; }catch{return[];} }
+  function writeTasks(arr){ localStorage.setItem(TASKS_KEY, JSON.stringify(arr)); }          // no render (fixes keyboard)
+  function saveTasksAndRender(arr){ writeTasks(arr); render(); }                              // use when UI must update
+  function nextId(){ const n=+(localStorage.getItem(NEXTID_KEY)||"1"); localStorage.setItem(NEXTID_KEY,String(n+1)); return n; }
 
-  function loadStatus(dk){
-    try { return JSON.parse(localStorage.getItem(statusKey(dk)) || "{}"); }
-    catch { return {}; }
-  }
-  function saveStatus(dk, obj){
-    localStorage.setItem(statusKey(dk), JSON.stringify(obj));
-    updateKPIs();
-  }
+  function loadStatus(dk){ try{ return JSON.parse(localStorage.getItem(statusKey(dk))||"{}"); }catch{return{};} }
+  function saveStatus(dk,obj){ localStorage.setItem(statusKey(dk), JSON.stringify(obj)); updateKPIs(); }
 
-  // -------- DOM Refs --------
-  const $rows = document.getElementById("rows");
-  const $addRow = document.getElementById("addRow");
-  const $resetToday = document.getElementById("resetToday");
-  const $todayLabel = document.getElementById("todayLabel");
-  const $activeTopicsBadge = document.getElementById("activeTopicsBadge");
+  // ---------- DOM ----------
+  const $rows=document.getElementById("rows");
+  const $addRow=document.getElementById("addRow");
+  const $resetToday=document.getElementById("resetToday");
+  const $todayLabel=document.getElementById("todayLabel");
+  const $activeTopicsBadge=document.getElementById("activeTopicsBadge");
 
-  const $chunksDoneN = document.getElementById("chunksDoneN");
-  const $chunksTotalN = document.getElementById("chunksTotalN");
-  const $topicsDoneN = document.getElementById("topicsDoneN");
-  const $topicsActiveN = document.getElementById("topicsActiveN");
-  const $subjectsDoneN = document.getElementById("subjectsDoneN");
-  const $subjectsActiveN = document.getElementById("subjectsActiveN");
+  // KPIs
+  const $chunksDoneN=document.getElementById("chunksDoneN");
+  const $chunksTotalN=document.getElementById("chunksTotalN");
+  const $topicsDoneN=document.getElementById("topicsDoneN");
+  const $topicsActiveN=document.getElementById("topicsActiveN");
+  const $subjectsDoneN=document.getElementById("subjectsDoneN");
+  const $subjectsActiveN=document.getElementById("subjectsActiveN");
 
-  // -------- Render --------
   function render(){
-    const tasks = loadTasks();
-    const dk = dateKey();
-    const st = loadStatus(dk);
+    const tasks=loadTasks();
+    const dk=dateKey();
+    const st=loadStatus(dk);
+    $todayLabel.textContent=`Today: ${dk}`;
+    $rows.innerHTML="";
 
-    $todayLabel.textContent = `Today: ${dk}`;
-    $rows.innerHTML = "";
-
-    tasks.forEach((t, idx) => {
-      const per = st[t.id] || {chunk:false, topicToday:false, subjectToday:false};
-
-      // Chunk is checked if topic is already done (persistent) OR today's chunk is manually checked
+    tasks.forEach((t,idx)=>{
+      const per=st[t.id]||{chunk:false,topicToday:false,subjectToday:false};
       const chunkChecked = t.topicDone ? true : !!per.chunk;
       const topicChecked = !!t.topicDone;
       const subjectChecked = !!t.subjectDone;
 
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
+      const tr=document.createElement("tr");
+      tr.innerHTML=`
         <td class="center">${idx+1}</td>
-        <td><input type="text" placeholder="Subject…" value="${t.subject||""}"></td>
-        <td><input type="text" placeholder="Active topic…" value="${t.topic||""}"></td>
+        <td><input type="text" placeholder="Subject…" value="${t.subject||""}" autocapitalize="sentences" spellcheck="false" inputmode="text"></td>
+        <td><input type="text" placeholder="Active topic…" value="${t.topic||""}" autocapitalize="sentences" spellcheck="false" inputmode="text"></td>
         <td class="center"><input class="checkbox" type="checkbox" ${chunkChecked?"checked":""} ${t.topicDone?"disabled":""}></td>
         <td class="center"><input class="checkbox" type="checkbox" ${topicChecked?"checked":""}></td>
         <td class="center"><input class="checkbox" type="checkbox" ${subjectChecked?"checked":""}></td>
-        <td class="right"><button class="small del" title="Delete row">Delete</button></td>
+        <td class="right"><button class="small del">Delete</button></td>
       `;
 
-      // Subject / Topic text edits
-      tr.children[1].querySelector("input").addEventListener("input", e => { t.subject = e.target.value; saveTasks(tasks); });
-      tr.children[2].querySelector("input").addEventListener("input", e => { t.topic   = e.target.value; saveTasks(tasks); });
+      const debouncedPersist = debounce(()=>writeTasks(tasks), 180);
 
-      // Chunk (per-day) — only matters when topic isn't done
+      // Subject / Topic inputs: save without re-render (prevents keyboard drop on iOS)
+      tr.children[1].querySelector("input").addEventListener("input", e => { t.subject=e.target.value; debouncedPersist(); });
+      tr.children[2].querySelector("input").addEventListener("input", e => { t.topic=e.target.value; debouncedPersist(); });
+
+      // Chunk (per-day)
       tr.children[3].querySelector("input").addEventListener("change", e => {
-        st[t.id] = st[t.id] || {chunk:false, topicToday:false, subjectToday:false};
-        st[t.id].chunk = e.target.checked;
-        saveStatus(dk, st);
+        st[t.id]=st[t.id]||{chunk:false,topicToday:false,subjectToday:false};
+        st[t.id].chunk=e.target.checked; saveStatus(dk,st);
       });
 
-      // Topic Done (persistent)
+      // Topic Done (persistent) -> re-render to disable Chunk box
       tr.children[4].querySelector("input").addEventListener("change", e => {
-        const checked = e.target.checked;
-        t.topicDone = checked;                          // persist across days
-        st[t.id] = st[t.id] || {chunk:false, topicToday:false, subjectToday:false};
-        st[t.id].topicToday = checked;                  // count if done today
-        if (checked) st[t.id].chunk = true;             // also credit a chunk today
-        saveTasks(tasks);
-        saveStatus(dk, st);
+        const checked=e.target.checked;
+        t.topicDone=checked;
+        st[t.id]=st[t.id]||{chunk:false,topicToday:false,subjectToday:false};
+        st[t.id].topicToday=checked;
+        if(checked) st[t.id].chunk=true;
+        saveTasksAndRender(tasks);
+        saveStatus(dk,st);
       });
 
       // Subject Done (persistent)
       tr.children[5].querySelector("input").addEventListener("change", e => {
-        const checked = e.target.checked;
-        t.subjectDone = checked;                        // persist across days
-        st[t.id] = st[t.id] || {chunk:false, topicToday:false, subjectToday:false};
-        st[t.id].subjectToday = checked;                // count if done today
-        saveTasks(tasks);
-        saveStatus(dk, st);
+        const checked=e.target.checked;
+        t.subjectDone=checked;
+        st[t.id]=st[t.id]||{chunk:false,topicToday:false,subjectToday:false};
+        st[t.id].subjectToday=checked;
+        writeTasks(tasks); // no need to re-render
+        saveStatus(dk,st);
       });
 
-      // Delete row
-      tr.children[6].querySelector("button").addEventListener("click", () => {
-        const tasks2 = loadTasks().filter(x => x.id !== t.id);
-        saveTasks(tasks2);
+      tr.children[6].querySelector("button").addEventListener("click", ()=>{
+        const tasks2=loadTasks().filter(x=>x.id!==t.id);
+        saveTasksAndRender(tasks2);
       });
 
       $rows.appendChild(tr);
@@ -219,61 +195,51 @@
   }
 
   function updateKPIs(){
-    const tasks = loadTasks();
-    const dk = dateKey();
-    const st = loadStatus(dk);
+    const tasks=loadTasks();
+    const st=loadStatus(dateKey());
 
-    // Today counts (per-day status only)
-    let chunksDoneToday = 0, topicsDoneToday = 0, subjectsDoneToday = 0;
-    tasks.forEach(t => {
-      const s = st[t.id] || {};
-      if (s.chunk) chunksDoneToday++;
-      if (s.topicToday) topicsDoneToday++;
-      if (s.subjectToday) subjectsDoneToday++;
+    let chunksDoneToday=0, topicsDoneToday=0, subjectsDoneToday=0;
+    tasks.forEach(t=>{
+      const s=st[t.id]||{};
+      if(s.chunk) chunksDoneToday++;
+      if(s.topicToday) topicsDoneToday++;
+      if(s.subjectToday) subjectsDoneToday++;
     });
 
-    // Active totals (persistent)
-    const activeTopics = tasks.filter(t => !t.topicDone).length;
-    const activeSubjects = tasks.filter(t => !t.subjectDone).length;
+    const activeTopics=tasks.filter(t=>!t.topicDone).length;
+    const activeSubjects=tasks.filter(t=>!t.subjectDone).length;
 
-    // KPIs
-    $chunksDoneN.textContent = chunksDoneToday;
-    $chunksTotalN.textContent = activeTopics;          // only topics not done contribute daily chunks
-    $topicsDoneN.textContent = topicsDoneToday;
-    $topicsActiveN.textContent = activeTopics;
-    $subjectsDoneN.textContent = subjectsDoneToday;
-    $subjectsActiveN.textContent = activeSubjects;
-    $activeTopicsBadge.textContent = `Active Topics: ${activeTopics}`;
+    $chunksDoneN.textContent=chunksDoneToday;
+    $chunksTotalN.textContent=activeTopics;
+    $topicsDoneN.textContent=topicsDoneToday;
+    $topicsActiveN.textContent=activeTopics;
+    $subjectsDoneN.textContent=subjectsDoneToday;
+    $subjectsActiveN.textContent=activeSubjects;
+    $activeTopicsBadge.textContent=`Active Topics: ${activeTopics}`;
   }
 
-  // -------- Add / Reset --------
-  document.getElementById("addRow").addEventListener("click", () => {
-    const tasks = loadTasks();
-    tasks.push({ id: nextId(), subject:"", topic:"", topicDone:false, subjectDone:false, created: Date.now() });
-    saveTasks(tasks);
+  // Add / Reset
+  document.getElementById("addRow").addEventListener("click", ()=>{
+    const tasks=loadTasks();
+    tasks.push({id:nextId(),subject:"",topic:"",topicDone:false,subjectDone:false,created:Date.now()});
+    saveTasksAndRender(tasks);
   });
 
-  // Reset only TODAY'S per-day marks (chunks/topicToday/subjectToday). Persistent flags remain.
   function clearTodayStatuses(){
-    const dk = dateKey();
+    const dk=dateKey();
     localStorage.removeItem(statusKey(dk));
     localStorage.setItem(LASTDATE_KEY, dk);
     render();
   }
-  document.getElementById("resetToday").addEventListener("click", () => {
-    if(confirm("Reset today's ticks? (Persistent Topic/Subject Done will stay)")){
-      clearTodayStatuses();
-    }
+  document.getElementById("resetToday").addEventListener("click", ()=>{
+    if(confirm("Reset today's ticks? (Topic/Subject Done stay)")) clearTodayStatuses();
   });
 
-  // -------- Midnight auto-refresh --------
+  // Midnight rollover
   function ensureToday(){
-    const dk = dateKey();
-    const last = localStorage.getItem(LASTDATE_KEY);
-    if(last !== dk){
-      localStorage.setItem(LASTDATE_KEY, dk);
-      render(); // new day -> per-day status naturally empty, persistent flags remain
-    }
+    const dk=dateKey();
+    const last=localStorage.getItem(LASTDATE_KEY);
+    if(last!==dk){ localStorage.setItem(LASTDATE_KEY, dk); render(); }
   }
   setInterval(ensureToday, 60*1000);
   if(!localStorage.getItem(LASTDATE_KEY)) localStorage.setItem(LASTDATE_KEY, dateKey());
